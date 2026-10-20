@@ -1,0 +1,37 @@
+{
+  "name": "sealedloop",
+  "version": "0.1.0",
+  "description": "Interview-loop engine that freezes a rubric by its canonical hash and refuses scorecards that rest on two rubrics",
+  "keywords": [
+    "hiring",
+    "interview",
+    "rubric",
+    "canonical-json",
+    "rfc8785"
+  ],
+  "license": "MIT",
+  "author": "Shipmind Labs <hello@shipmindlabs.com>",
+  "homepage": "https://shipmindlabs.com",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/shipmindlabs/sealedloop.git"
+  },
+  "bugs": {
+    "url": "https://github.com/shipmindlabs/sealedloop/issues"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.ts"
+  }
+}
