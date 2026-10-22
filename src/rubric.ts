@@ -2,8 +2,12 @@ import { createHash } from 'node:crypto';
 
 import { canonicalize } from './canonical.ts';
 import { SealedLoopError } from './errors.ts';
+import { NOT_ASSESSED } from './rating.ts';
+
+export const DEFAULT_MIN_EVIDENCE_CHARS = 80;
 
 export interface AnchorLevel {
+  readonly id: string;
   readonly level: number;
   readonly label: string;
   readonly description: string;
@@ -19,11 +23,13 @@ export interface Competency {
 export interface Rubric {
   readonly role: string;
   readonly parent: string | null;
+  readonly minEvidenceChars: number;
   readonly competencies: readonly Competency[];
   readonly rubricHash: string;
 }
 
 export interface AnchorLevelInput {
+  readonly id: string;
   readonly level: number;
   readonly label: string;
   readonly description: string;
@@ -39,12 +45,14 @@ export interface CompetencyInput {
 export interface RubricInput {
   readonly role: string;
   readonly competencies: readonly CompetencyInput[];
+  readonly minEvidenceChars?: number;
   readonly parent?: string | null;
 }
 
 export interface RubricRevision {
   readonly role?: string;
   readonly competencies?: readonly CompetencyInput[];
+  readonly minEvidenceChars?: number;
 }
 
 export interface RubricBound {
@@ -52,13 +60,19 @@ export interface RubricBound {
 }
 
 export function createRubric(input: RubricInput): Rubric {
-  return build(input.role, input.competencies, input.parent ?? null);
+  return build(
+    input.role,
+    input.competencies,
+    input.minEvidenceChars ?? DEFAULT_MIN_EVIDENCE_CHARS,
+    input.parent ?? null,
+  );
 }
 
 export function reviseRubric(rubric: Rubric, changes: RubricRevision = {}): Rubric {
   return build(
     changes.role ?? rubric.role,
     changes.competencies ?? rubric.competencies,
+    changes.minEvidenceChars ?? rubric.minEvidenceChars,
     rubric.rubricHash,
   );
 }
@@ -89,10 +103,16 @@ export function assertSameRubric(cards: readonly RubricBound[]): string {
   return agreed;
 }
 
-function build(role: unknown, competencies: unknown, parent: string | null): Rubric {
+function build(
+  role: unknown,
+  competencies: unknown,
+  minEvidenceChars: unknown,
+  parent: string | null,
+): Rubric {
   const body = {
     role: requireText(role, 'role'),
     parent: parent === null ? null : requireText(parent, 'parent'),
+    minEvidenceChars: requireCount(minEvidenceChars, 'minEvidenceChars'),
     competencies: buildCompetencies(competencies),
   };
   const rubricHash = createHash('sha256').update(canonicalize(body), 'utf8').digest('hex');
@@ -130,10 +150,22 @@ function buildCompetencies(value: unknown): Competency[] {
 function buildAnchors(value: unknown, where: string): AnchorLevel[] {
   const list = requireList(value, `${where}.anchors`);
   const anchors: AnchorLevel[] = [];
+  const seen = new Set<string>();
   let previous: number | null = null;
   for (let index = 0; index < list.length; index += 1) {
     const at = `${where}.anchors[${index}]`;
     const raw = requireRecord(list[index], at);
+    const id = requireText(raw.id, `${at}.id`);
+    if (id === NOT_ASSESSED) {
+      throw new SealedLoopError(
+        'INVALID_RUBRIC',
+        `${at}.id may not be ${NOT_ASSESSED}, which marks a competency left unrated`,
+      );
+    }
+    if (seen.has(id)) {
+      throw new SealedLoopError('INVALID_RUBRIC', `${at}.id repeats an earlier anchor: ${id}`);
+    }
+    seen.add(id);
     const level = raw.level;
     if (typeof level !== 'number' || !Number.isInteger(level)) {
       throw new SealedLoopError('INVALID_RUBRIC', `${at}.level must be an integer`);
@@ -146,6 +178,7 @@ function buildAnchors(value: unknown, where: string): AnchorLevel[] {
     }
     previous = level;
     anchors.push({
+      id,
       level,
       label: requireText(raw.label, `${at}.label`),
       description: requireText(raw.description, `${at}.description`),
@@ -159,6 +192,13 @@ function requireText(value: unknown, field: string): string {
     throw new SealedLoopError('INVALID_RUBRIC', `${field} must be a non-empty string`);
   }
   return value.normalize('NFC');
+}
+
+function requireCount(value: unknown, field: string): number {
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 1) {
+    throw new SealedLoopError('INVALID_RUBRIC', `${field} must be a positive integer`);
+  }
+  return value;
 }
 
 function requireList(value: unknown, field: string): readonly unknown[] {

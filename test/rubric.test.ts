@@ -2,21 +2,42 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import { SealedLoopError } from '../src/errors.ts';
-import { assertSameRubric, createRubric, reviseRubric } from '../src/rubric.ts';
+import {
+  DEFAULT_MIN_EVIDENCE_CHARS,
+  assertSameRubric,
+  createRubric,
+  reviseRubric,
+} from '../src/rubric.ts';
 import type { RubricInput } from '../src/rubric.ts';
 
 function input(): RubricInput {
   return {
     role: 'Backend Engineer',
+    minEvidenceChars: 20,
     competencies: [
       {
         id: 'systems-design',
         mustHave: true,
         bar: 3,
         anchors: [
-          { level: 1, label: 'Novice', description: 'Sketches one service and stops there.' },
-          { level: 2, label: 'Working', description: 'Weighs two designs and names the tradeoff.' },
-          { level: 3, label: 'Strong', description: 'Designs for failure, load and rollback.' },
+          {
+            id: 'sd-novice',
+            level: 1,
+            label: 'Novice',
+            description: 'Sketches one service and stops there.',
+          },
+          {
+            id: 'sd-working',
+            level: 2,
+            label: 'Working',
+            description: 'Weighs two designs and names the tradeoff.',
+          },
+          {
+            id: 'sd-strong',
+            level: 3,
+            label: 'Strong',
+            description: 'Designs for failure, load and rollback.',
+          },
         ],
       },
       {
@@ -24,8 +45,18 @@ function input(): RubricInput {
         mustHave: false,
         bar: 2,
         anchors: [
-          { level: 1, label: 'Novice', description: 'Answers questions only when asked.' },
-          { level: 2, label: 'Working', description: 'Surfaces disagreement early, in writing.' },
+          {
+            id: 'co-novice',
+            level: 1,
+            label: 'Novice',
+            description: 'Answers questions only when asked.',
+          },
+          {
+            id: 'co-working',
+            level: 2,
+            label: 'Working',
+            description: 'Surfaces disagreement early, in writing.',
+          },
         ],
       },
     ],
@@ -41,6 +72,14 @@ test('a created rubric carries a sha256 hex hash and no parent', () => {
   assert.match(rubric.rubricHash, /^[0-9a-f]{64}$/);
   assert.equal(rubric.parent, null);
   assert.equal(rubric.competencies.length, 2);
+  assert.equal(rubric.minEvidenceChars, 20);
+});
+
+test('minEvidenceChars falls back to the default and takes part in the hash', () => {
+  const base = input();
+  const plain = createRubric({ role: base.role, competencies: base.competencies });
+  assert.equal(plain.minEvidenceChars, DEFAULT_MIN_EVIDENCE_CHARS);
+  assert.notEqual(plain.rubricHash, createRubric(base).rubricHash);
 });
 
 test('a created rubric is frozen all the way down', () => {
@@ -62,10 +101,12 @@ test('declaration order of the input does not change the hash', () => {
         description: anchor.description,
         label: anchor.label,
         level: anchor.level,
+        id: anchor.id,
       })),
       mustHave: competency.mustHave,
       id: competency.id,
     })),
+    minEvidenceChars: base.minEvidenceChars,
     role: base.role,
   };
   assert.equal(createRubric(reordered).rubricHash, createRubric(base).rubricHash);
@@ -118,6 +159,7 @@ test('reviseRubric links to the old hash and leaves the old rubric alone', () =>
   const revised = reviseRubric(rubric, { role: 'Backend Engineer II' });
   assert.equal(revised.parent, before);
   assert.notEqual(revised.rubricHash, before);
+  assert.equal(revised.minEvidenceChars, rubric.minEvidenceChars);
   assert.equal(rubric.rubricHash, before);
   assert.equal(rubric.parent, null);
   assert.equal(rubric.role, 'Backend Engineer');
@@ -130,6 +172,8 @@ test('an invalid rubric is refused rather than frozen', () => {
   const first = base.competencies[0]!;
   refusal(() => createRubric({ ...base, role: '  ' }), 'INVALID_RUBRIC');
   refusal(() => createRubric({ ...base, competencies: [] }), 'INVALID_RUBRIC');
+  refusal(() => createRubric({ ...base, minEvidenceChars: 0 }), 'INVALID_RUBRIC');
+  refusal(() => createRubric({ ...base, minEvidenceChars: 1.5 }), 'INVALID_RUBRIC');
   refusal(
     () => createRubric({ ...base, competencies: [{ ...first, bar: 9 }] }),
     'INVALID_RUBRIC',
@@ -144,6 +188,31 @@ test('an invalid rubric is refused rather than frozen', () => {
   );
   refusal(
     () => createRubric({ ...base, competencies: [first, { ...first, id: 'systems-design' }] }),
+    'INVALID_RUBRIC',
+  );
+});
+
+test('anchor ids must be unique and may not take the not-assessed name', () => {
+  const base = input();
+  const first = base.competencies[0]!;
+  refusal(
+    () =>
+      createRubric({
+        ...base,
+        competencies: [
+          { ...first, anchors: [first.anchors[0]!, { ...first.anchors[1]!, id: 'sd-novice' }] },
+        ],
+      }),
+    'INVALID_RUBRIC',
+  );
+  refusal(
+    () =>
+      createRubric({
+        ...base,
+        competencies: [
+          { ...first, bar: 1, anchors: [{ ...first.anchors[0]!, id: 'not-assessed' }] },
+        ],
+      }),
     'INVALID_RUBRIC',
   );
 });
