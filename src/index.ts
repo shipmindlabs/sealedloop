@@ -1,5 +1,18 @@
 export { canonicalize } from './canonical.ts';
 export { SealedLoopError } from './errors.ts';
+export { Loop } from './loop.ts';
+export type {
+  CardView,
+  Debrief,
+  LoopOptions,
+  PendingView,
+  RecusedView,
+  SealedView,
+  SubmittedView,
+  Viewer,
+  ViewerRef,
+  ViewerRole,
+} from './loop.ts';
 export { NOT_ASSESSED } from './rating.ts';
 export type { Rating } from './rating.ts';
 export {
@@ -26,3 +39,5 @@ export {
   setRating,
 } from './scorecard.ts';
 export type { EvidenceNote, Scorecard, ScorecardIdentity } from './scorecard.ts';
+export { MemoryStore } from './store.ts';
+export type { Assignment, Recusal, Store } from './store.ts';
