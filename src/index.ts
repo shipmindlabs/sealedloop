@@ -1,4 +1,6 @@
 export { canonicalize } from './canonical.ts';
+export { SALT_BYTES, commitmentOf, verifyChain } from './chain.ts';
+export type { ChainCheck, ChainEntry } from './chain.ts';
 export { SealedLoopError } from './errors.ts';
 export { Loop } from './loop.ts';
 export type {
@@ -40,4 +42,4 @@ export {
 } from './scorecard.ts';
 export type { EvidenceNote, Scorecard, ScorecardIdentity } from './scorecard.ts';
 export { MemoryStore } from './store.ts';
-export type { Assignment, Recusal, Store } from './store.ts';
+export type { Assignment, CommitSeal, Recusal, Store } from './store.ts';

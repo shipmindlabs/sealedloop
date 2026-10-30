@@ -4,11 +4,13 @@ An interview-loop engine: a frozen rubric, sealed independent scorecards, rating
 anchored levels backed by evidence, and a declared aggregation rule — so a hiring decision
 can be traced back to what each interviewer actually observed.
 
-Three invariants are in place so far: **a rubric is identified by the hash of its own
+Four invariants are in place so far: **a rubric is identified by the hash of its own
 content, and scorecards that rest on two different rubrics are refused instead of
 averaged**; **a rating is an anchor of that competency or the explicit value
-`NOT_ASSESSED` — never a bare number, never silence**; and **another interviewer's card
-reads as `SEALED` until you have submitted or recused, and no role buys a look.**
+`NOT_ASSESSED` — never a bare number, never silence**; **another interviewer's card
+reads as `SEALED` until you have submitted or recused, and no role buys a look**; and
+**every submission is committed to an append-only hash chain, so a card edited behind the
+API's back is named when the debrief opens.**
 
 ## Requirements
 
@@ -138,10 +140,44 @@ on a second rubric (`RUBRIC_MISMATCH`).
 
 `openDebrief(candidateRef, by)` throws `NOT_ALL_IN` while any assigned interviewer has
 neither submitted nor recused, naming who is missing. Once the panel is complete it returns
-every card, every recusal and the one `rubricHash` they share — `null` if everybody recused.
+every card, every recusal, the chain, and the one `rubricHash` they share — `null` if
+everybody recused.
 
-`Store` is the whole persistence seam. `MemoryStore` keeps a loop in process, and
+`Store` is the whole persistence seam: assignments, cards, recusals, chain entries and the
+salt kept beside each sealed card. `MemoryStore` keeps a loop in process, and
 `new Loop({ loopId })` makes one for you.
+
+### The commitment chain
+
+Each candidate has an append-only chain of entries `{ seq, prev, kind, body, hash }`, where
+`prev` is the hash of the entry before it and `hash` is the SHA-256 of the canonical form of
+`{ seq, prev, kind, body }`. `assign` writes one entry, `submit` writes a `commit` entry and
+`recuse` writes a `recuse` entry holding a digest of the reason rather than its text.
+
+```ts
+import { verifyChain } from 'sealedloop';
+
+loop.chain('cand-7');
+// [ { seq: 0, prev: null, kind: 'assign', body: { candidateRef, interviewerIds }, hash },
+//   { seq: 1, prev: '…', kind: 'commit', body: { candidateRef, interviewerId, commitment }, hash } ]
+
+verifyChain(loop.chain('cand-7')); // { ok: true }
+```
+
+The commitment is `SHA-256(salt + canonical skeleton)`. The skeleton holds the ids, the
+`rubricHash`, the rated anchor of every competency with its level, and the SHA-256 digest of
+each evidence note — never the note text. The 32-byte random salt is kept beside the sealed
+card in the `Store` and never enters the chain, so a chain entry neither reads back as a
+scorecard nor confirms a guessed one.
+
+`openDebrief` runs `verifyChain` and then recomputes every commitment from the stored card
+and its salt. A card that no longer matches throws `TAMPERED` naming the interviewer and the
+`seq` of the commitment it broke; a chain whose links no longer hold throws `TAMPERED` naming
+the first broken `seq`.
+
+`verifyChain(entries)` returns `{ ok: true }` or `{ ok: false, firstBroken }`, where
+`firstBroken` is the first `seq` at which the chain stops holding — so a deleted middle entry
+is named by its own `seq`, and an edited one by its.
 
 ## How the hash is formed
 
@@ -160,8 +196,8 @@ no canonical form, `INVALID_RUBRIC` for a rubric that cannot be frozen as given,
 `INVALID_SCORECARD`, `INVALID_EVIDENCE`, `UNKNOWN_COMPETENCY`, `OFF_SCALE`,
 `MISSING_RATING` and `EVIDENCE_REQUIRED` for a single card, and `INVALID_LOOP`,
 `INVALID_ASSIGNMENT`, `ALREADY_ASSIGNED`, `UNKNOWN_CANDIDATE`, `NOT_ASSIGNED`, `WRONG_LOOP`,
-`ALREADY_SUBMITTED`, `RECUSED`, `INVALID_RECUSAL`, `INVALID_VIEWER` and `NOT_ALL_IN` for the
-loop.
+`ALREADY_SUBMITTED`, `RECUSED`, `INVALID_RECUSAL`, `INVALID_VIEWER`, `NOT_ALL_IN` and
+`TAMPERED` for the loop.
 
 ## Tests
 
@@ -174,6 +210,10 @@ npm test
 - Anyone who reads the storage directly bypasses sealing. Sealing is a rule of this API, not
   encryption: a `Store` holds plain cards, so a database client, a backup or a debug log sees
   all of them.
+- The chain catches an edited card, not a rewritten store. Whoever can change cards, salts
+  and entries together can recompute a consistent history; what the chain takes away is the
+  quiet single-row edit. Copy the head hash somewhere that writer does not control if you
+  need more than that.
 - Cross-card aggregation and the declared decision rule are still to come. A debrief hands
   you every card; it does not score them.
 - A panel is assigned once per candidate. `assign` on a candidate who already has one throws

@@ -1,3 +1,5 @@
+import { commitmentOf, digestOf, newSalt, nextEntry, verifyChain } from './chain.ts';
+import type { ChainEntry } from './chain.ts';
 import { SealedLoopError } from './errors.ts';
 import { assertSameRubric } from './rubric.ts';
 import { checkSubmittable } from './scorecard.ts';
@@ -44,6 +46,7 @@ export interface Debrief {
   readonly rubricHash: string | null;
   readonly cards: readonly Scorecard[];
   readonly recusals: readonly Recusal[];
+  readonly chain: readonly ChainEntry[];
 }
 
 export interface LoopOptions {
@@ -87,6 +90,7 @@ export class Loop {
       interviewerIds: Object.freeze(ids),
     });
     this.#store.writeAssignment(assignment);
+    this.#append(ref, 'assign', { candidateRef: ref, interviewerIds: [...ids] });
     return assignment;
   }
 
@@ -115,6 +119,13 @@ export class Loop {
     }
     checkSubmittable(card);
     assertSameRubric([...this.#store.readCards(ref), card]);
+    const salt = newSalt();
+    const entry = this.#append(ref, 'commit', {
+      candidateRef: ref,
+      interviewerId,
+      commitment: commitmentOf(card, salt),
+    });
+    this.#store.writeSeal(Object.freeze({ candidateRef: ref, interviewerId, seq: entry.seq, salt }));
     this.#store.writeCard(card);
     return card;
   }
@@ -141,6 +152,11 @@ export class Loop {
       reason: requireText(reason, 'reason', 'INVALID_RECUSAL'),
     });
     this.#store.writeRecusal(recusal);
+    this.#append(ref, 'recuse', {
+      candidateRef: ref,
+      interviewerId: id,
+      reasonDigest: digestOf(recusal.reason),
+    });
     return recusal;
   }
 
@@ -173,11 +189,17 @@ export class Loop {
     return Object.freeze(views);
   }
 
+  chain(candidateRef: string): readonly ChainEntry[] {
+    const assignment = this.#panel(candidateRef);
+    return Object.freeze([...this.#store.readChain(assignment.candidateRef)]);
+  }
+
   openDebrief(candidateRef: string, by: ViewerRef): Debrief {
     const assignment = this.#panel(candidateRef);
+    const ref = assignment.candidateRef;
     const openedBy = viewerIdOf(by);
-    const cards = this.#store.readCards(assignment.candidateRef);
-    const recusals = this.#store.readRecusals(assignment.candidateRef);
+    const cards = this.#store.readCards(ref);
+    const recusals = this.#store.readRecusals(ref);
     const waiting = assignment.interviewerIds.filter(
       (interviewerId) =>
         !cards.some((filed) => filed.interviewerId === interviewerId) &&
@@ -186,17 +208,54 @@ export class Loop {
     if (waiting.length > 0) {
       throw new SealedLoopError(
         'NOT_ALL_IN',
-        `${waiting.join(', ')} ${waiting.length === 1 ? 'has' : 'have'} neither submitted nor recused for ${assignment.candidateRef}`,
+        `${waiting.join(', ')} ${waiting.length === 1 ? 'has' : 'have'} neither submitted nor recused for ${ref}`,
       );
     }
+    const chain = this.#store.readChain(ref);
+    const check = verifyChain(chain);
+    if (!check.ok) {
+      throw new SealedLoopError(
+        'TAMPERED',
+        `the chain for ${ref} breaks at entry ${check.firstBroken}`,
+      );
+    }
+    for (const card of cards) {
+      this.#recheck(ref, card, chain);
+    }
     const debrief: Debrief = {
-      candidateRef: assignment.candidateRef,
+      candidateRef: ref,
       openedBy,
       rubricHash: cards.length === 0 ? null : assertSameRubric(cards),
       cards: Object.freeze([...cards]),
       recusals: Object.freeze([...recusals]),
+      chain: Object.freeze([...chain]),
     };
     return Object.freeze(debrief);
+  }
+
+  #recheck(candidateRef: string, card: Scorecard, chain: readonly ChainEntry[]): void {
+    const seal = this.#store.readSeal(candidateRef, card.interviewerId);
+    if (seal === undefined) {
+      throw new SealedLoopError(
+        'TAMPERED',
+        `the card ${card.interviewerId} filed for ${candidateRef} has no commitment behind it`,
+      );
+    }
+    const entry = chain.find((filed) => filed.seq === seal.seq);
+    const stored = entry?.kind === 'commit' ? entry.body['commitment'] : undefined;
+    const committed = typeof stored === 'string' ? stored : '';
+    if (committed !== commitmentOf(card, seal.salt)) {
+      throw new SealedLoopError(
+        'TAMPERED',
+        `the card ${card.interviewerId} filed for ${candidateRef} no longer matches the commitment at entry ${seal.seq}`,
+      );
+    }
+  }
+
+  #append(candidateRef: string, kind: string, body: Readonly<Record<string, unknown>>): ChainEntry {
+    const entry = nextEntry(this.#store.readChain(candidateRef), kind, body);
+    this.#store.appendEntry(candidateRef, entry);
+    return entry;
   }
 
   #panel(candidateRef: unknown): Assignment {
