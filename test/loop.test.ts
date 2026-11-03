@@ -70,11 +70,13 @@ test('a panel is assigned once, with ids that are checked', () => {
   const panel = new Loop({ loopId: 'loop-14' });
   const assignment = panel.assign('cand-7', ['eng-3', 'eng-4']);
   assert.deepEqual(assignment.interviewerIds, ['eng-3', 'eng-4']);
+  assert.equal(assignment.displayNameDigest, null);
   assert.ok(Object.isFrozen(assignment.interviewerIds));
   refusal(() => panel.assign('cand-7', ['eng-9']), 'ALREADY_ASSIGNED');
   refusal(() => panel.assign(' ', ['eng-3']), 'INVALID_ASSIGNMENT');
   refusal(() => panel.assign('cand-8', []), 'INVALID_ASSIGNMENT');
   refusal(() => panel.assign('cand-8', ['eng-3', 'eng-3']), 'INVALID_ASSIGNMENT');
+  refusal(() => panel.assign('cand-8', ['eng-3'], { displayName: '  ' }), 'INVALID_ASSIGNMENT');
   refusal(() => panel.readCards('eng-3', 'cand-9'), 'UNKNOWN_CANDIDATE');
   refusal(() => panel.openDebrief('cand-9', 'hm-1'), 'UNKNOWN_CANDIDATE');
 });
@@ -134,10 +136,10 @@ test('a recusal is final and reads with its reason once the viewer is in', () =>
   const views = panel.readCards('eng-5', 'cand-7');
   assert.deepEqual(statuses(views), ['PENDING', 'PENDING', 'RECUSED']);
   const own = views[2]!;
-  if (own.status === 'RECUSED') {
-    assert.equal(own.reason, REASON);
+  if (own.status === 'RECUSED' && own.reason.status === 'PRESENT') {
+    assert.equal(own.reason.text, REASON);
   } else {
-    assert.fail('the recusing viewer should read as RECUSED');
+    assert.fail('the recusing viewer should read as RECUSED with the reason');
   }
 });
 

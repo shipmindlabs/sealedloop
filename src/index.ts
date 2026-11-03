@@ -4,8 +4,11 @@ export type { ChainCheck, ChainEntry } from './chain.ts';
 export { SealedLoopError } from './errors.ts';
 export { Loop } from './loop.ts';
 export type {
+  AssignOptions,
   CardView,
   Debrief,
+  Erasure,
+  ErasureRequest,
   LoopOptions,
   PendingView,
   RecusedView,
@@ -38,8 +41,18 @@ export {
   anchorPosition,
   checkSubmittable,
   draftScorecard,
+  readDraftText,
   setRating,
 } from './scorecard.ts';
 export type { EvidenceNote, Scorecard, ScorecardIdentity } from './scorecard.ts';
 export { MemoryStore } from './store.ts';
-export type { Assignment, CommitSeal, Recusal, Store } from './store.ts';
+export type { Assignment, CommitSeal, Recusal, Retention, Store } from './store.ts';
+export { digestOf } from './vault.ts';
+export type {
+  ErasedText,
+  MissingText,
+  PresentText,
+  TextRead,
+  TextResolver,
+  Tombstone,
+} from './vault.ts';

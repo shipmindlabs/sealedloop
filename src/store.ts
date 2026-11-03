@@ -1,15 +1,18 @@
 import type { ChainEntry } from './chain.ts';
 import type { Scorecard } from './scorecard.ts';
+import { erasedText, missingText, presentText } from './vault.ts';
+import type { TextRead, Tombstone } from './vault.ts';
 
 export interface Assignment {
   readonly candidateRef: string;
   readonly interviewerIds: readonly string[];
+  readonly displayNameDigest: string | null;
 }
 
 export interface Recusal {
   readonly candidateRef: string;
   readonly interviewerId: string;
-  readonly reason: string;
+  readonly reasonDigest: string;
 }
 
 export interface CommitSeal {
@@ -17,6 +20,11 @@ export interface CommitSeal {
   readonly interviewerId: string;
   readonly seq: number;
   readonly salt: Uint8Array;
+}
+
+export interface Retention {
+  readonly candidateRef: string;
+  readonly until: string;
 }
 
 export interface Store {
@@ -30,6 +38,13 @@ export interface Store {
   appendEntry(candidateRef: string, entry: ChainEntry): void;
   readSeal(candidateRef: string, interviewerId: string): CommitSeal | undefined;
   writeSeal(seal: CommitSeal): void;
+  readText(candidateRef: string, digest: string): TextRead;
+  // A digest already in the vault keeps the record it has, so a tombstone never reopens.
+  writeText(candidateRef: string, digest: string, text: string): void;
+  listTexts(candidateRef: string): readonly TextRead[];
+  eraseText(candidateRef: string, digest: string, tombstone: Tombstone): void;
+  writeRetention(retention: Retention): void;
+  listRetentions(): readonly Retention[];
 }
 
 export class MemoryStore implements Store {
@@ -38,6 +53,8 @@ export class MemoryStore implements Store {
   readonly #recusals = new Map<string, Recusal[]>();
   readonly #chains = new Map<string, ChainEntry[]>();
   readonly #seals = new Map<string, CommitSeal>();
+  readonly #texts = new Map<string, Map<string, TextRead>>();
+  readonly #retentions = new Map<string, Retention>();
 
   readAssignment(candidateRef: string): Assignment | undefined {
     return this.#assignments.get(candidateRef);
@@ -77,6 +94,49 @@ export class MemoryStore implements Store {
 
   writeSeal(seal: CommitSeal): void {
     this.#seals.set(sealKey(seal.candidateRef, seal.interviewerId), seal);
+  }
+
+  readText(candidateRef: string, digest: string): TextRead {
+    return this.#texts.get(candidateRef)?.get(digest) ?? missingText(digest);
+  }
+
+  writeText(candidateRef: string, digest: string, text: string): void {
+    const vault = this.#vault(candidateRef);
+    if (vault.has(digest)) {
+      return;
+    }
+    vault.set(digest, presentText(digest, text));
+  }
+
+  listTexts(candidateRef: string): readonly TextRead[] {
+    return [...(this.#texts.get(candidateRef)?.values() ?? [])];
+  }
+
+  eraseText(candidateRef: string, digest: string, tombstone: Tombstone): void {
+    const vault = this.#vault(candidateRef);
+    const kept = vault.get(digest);
+    if (kept === undefined || kept.status === 'ERASED') {
+      return;
+    }
+    vault.set(digest, erasedText(digest, tombstone));
+  }
+
+  writeRetention(retention: Retention): void {
+    this.#retentions.set(retention.candidateRef, retention);
+  }
+
+  listRetentions(): readonly Retention[] {
+    return [...this.#retentions.values()];
+  }
+
+  #vault(candidateRef: string): Map<string, TextRead> {
+    const kept = this.#texts.get(candidateRef);
+    if (kept !== undefined) {
+      return kept;
+    }
+    const vault = new Map<string, TextRead>();
+    this.#texts.set(candidateRef, vault);
+    return vault;
   }
 }
 

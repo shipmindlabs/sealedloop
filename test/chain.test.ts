@@ -11,6 +11,7 @@ import type { Rubric } from '../src/rubric.ts';
 import { addEvidence, draftScorecard, setRating } from '../src/scorecard.ts';
 import type { Scorecard } from '../src/scorecard.ts';
 import { MemoryStore } from '../src/store.ts';
+import { digestOf } from '../src/vault.ts';
 
 const NOTE = 'Designed for failure, load and rollback on the whiteboard.';
 const REASON = 'I managed this candidate for two years.';
@@ -204,7 +205,10 @@ test('evidence added behind the API is caught at the reveal', () => {
   const filed = store.readCards('cand-7')[0]!;
   store.cardEdits.set('eng-3', {
     ...filed,
-    evidence: [...filed.evidence, { competencyId: 'collaboration', text: 'Added afterwards.' }],
+    evidence: [
+      ...filed.evidence,
+      { competencyId: 'collaboration', digest: digestOf('Added afterwards.') },
+    ],
   });
   tampered(() => panel.openDebrief('cand-7', 'hm-1'), 'entry 1');
 });

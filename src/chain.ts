@@ -63,10 +63,6 @@ export function commitmentOf(card: Scorecard, salt: Uint8Array): string {
     .digest('hex');
 }
 
-export function digestOf(text: string): string {
-  return createHash('sha256').update(text.normalize('NFC'), 'utf8').digest('hex');
-}
-
 function skeletonOf(card: Scorecard): Record<string, unknown> {
   return {
     loopId: card.loopId,
@@ -83,7 +79,7 @@ function skeletonOf(card: Scorecard): Record<string, unknown> {
     }),
     evidence: card.evidence.map((note) => ({
       competencyId: note.competencyId,
-      digest: digestOf(note.text),
+      digest: note.digest,
     })),
   };
 }

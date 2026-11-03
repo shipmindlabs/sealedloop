@@ -1,11 +1,13 @@
-import { commitmentOf, digestOf, newSalt, nextEntry, verifyChain } from './chain.ts';
+import { commitmentOf, newSalt, nextEntry, verifyChain } from './chain.ts';
 import type { ChainEntry } from './chain.ts';
 import { SealedLoopError } from './errors.ts';
 import { assertSameRubric } from './rubric.ts';
-import { checkSubmittable } from './scorecard.ts';
+import { checkSubmittable, readDraftText, redactScorecard } from './scorecard.ts';
 import type { Scorecard } from './scorecard.ts';
 import { MemoryStore } from './store.ts';
-import type { Assignment, Recusal, Store } from './store.ts';
+import type { Assignment, Recusal, Retention, Store } from './store.ts';
+import { digestOf } from './vault.ts';
+import type { TextRead, TextResolver, Tombstone } from './vault.ts';
 
 export type ViewerRole = 'interviewer' | 'hiring-manager';
 
@@ -15,6 +17,10 @@ export interface Viewer {
 }
 
 export type ViewerRef = string | Viewer;
+
+export interface AssignOptions {
+  readonly displayName?: string;
+}
 
 export interface SealedView {
   readonly status: 'SEALED';
@@ -35,10 +41,23 @@ export interface SubmittedView {
 export interface RecusedView {
   readonly status: 'RECUSED';
   readonly interviewerId: string;
-  readonly reason: string;
+  readonly reason: TextRead;
 }
 
 export type CardView = SealedView | PendingView | SubmittedView | RecusedView;
+
+export interface ErasureRequest {
+  readonly by: string;
+  readonly reason: string;
+  readonly at?: string | Date;
+}
+
+export interface Erasure {
+  readonly candidateRef: string;
+  readonly by: string;
+  readonly erasedAt: string;
+  readonly digests: readonly string[];
+}
 
 export interface Debrief {
   readonly candidateRef: string;
@@ -63,7 +82,11 @@ export class Loop {
     this.#store = options.store ?? new MemoryStore();
   }
 
-  assign(candidateRef: string, interviewerIds: readonly string[]): Assignment {
+  assign(
+    candidateRef: string,
+    interviewerIds: readonly string[],
+    options: AssignOptions = {},
+  ): Assignment {
     const ref = requireText(candidateRef, 'candidateRef', 'INVALID_ASSIGNMENT');
     if (this.#store.readAssignment(ref) !== undefined) {
       throw new SealedLoopError(
@@ -85,12 +108,25 @@ export class Loop {
       }
       ids.push(id);
     }
+    const displayName =
+      options.displayName === undefined
+        ? null
+        : requireText(options.displayName, 'displayName', 'INVALID_ASSIGNMENT');
+    const displayNameDigest = displayName === null ? null : digestOf(displayName);
     const assignment: Assignment = Object.freeze({
       candidateRef: ref,
       interviewerIds: Object.freeze(ids),
+      displayNameDigest,
     });
     this.#store.writeAssignment(assignment);
-    this.#append(ref, 'assign', { candidateRef: ref, interviewerIds: [...ids] });
+    if (displayName !== null && displayNameDigest !== null) {
+      this.#store.writeText(ref, displayNameDigest, displayName);
+    }
+    this.#append(ref, 'assign', {
+      candidateRef: ref,
+      interviewerIds: [...ids],
+      displayNameDigest,
+    });
     return assignment;
   }
 
@@ -117,17 +153,24 @@ export class Loop {
         `${interviewerId} already submitted a card for ${ref}`,
       );
     }
-    checkSubmittable(card);
+    checkSubmittable(card, this.#resolver(ref, card));
     assertSameRubric([...this.#store.readCards(ref), card]);
+    const filed = redactScorecard(card);
     const salt = newSalt();
     const entry = this.#append(ref, 'commit', {
       candidateRef: ref,
       interviewerId,
-      commitment: commitmentOf(card, salt),
+      commitment: commitmentOf(filed, salt),
     });
     this.#store.writeSeal(Object.freeze({ candidateRef: ref, interviewerId, seq: entry.seq, salt }));
-    this.#store.writeCard(card);
-    return card;
+    for (const note of filed.evidence) {
+      const read = readDraftText(card, note.digest);
+      if (read.status === 'PRESENT') {
+        this.#store.writeText(ref, note.digest, read.text);
+      }
+    }
+    this.#store.writeCard(filed);
+    return filed;
   }
 
   recuse(interviewerId: string, candidateRef: string, reason: string): Recusal {
@@ -146,25 +189,21 @@ export class Loop {
         `${id} already submitted a card for ${ref} and cannot withdraw it`,
       );
     }
-    const recusal: Recusal = Object.freeze({
-      candidateRef: ref,
-      interviewerId: id,
-      reason: requireText(reason, 'reason', 'INVALID_RECUSAL'),
-    });
+    const text = requireText(reason, 'reason', 'INVALID_RECUSAL');
+    const reasonDigest = digestOf(text);
+    const recusal: Recusal = Object.freeze({ candidateRef: ref, interviewerId: id, reasonDigest });
     this.#store.writeRecusal(recusal);
-    this.#append(ref, 'recuse', {
-      candidateRef: ref,
-      interviewerId: id,
-      reasonDigest: digestOf(recusal.reason),
-    });
+    this.#store.writeText(ref, reasonDigest, text);
+    this.#append(ref, 'recuse', { candidateRef: ref, interviewerId: id, reasonDigest });
     return recusal;
   }
 
   readCards(viewer: ViewerRef, candidateRef: string): readonly CardView[] {
     const assignment = this.#panel(candidateRef);
+    const ref = assignment.candidateRef;
     const viewerId = viewerIdOf(viewer);
-    const cards = this.#store.readCards(assignment.candidateRef);
-    const recusals = this.#store.readRecusals(assignment.candidateRef);
+    const cards = this.#store.readCards(ref);
+    const recusals = this.#store.readRecusals(ref);
     const viewerIsIn =
       cards.some((filed) => filed.interviewerId === viewerId) ||
       recusals.some((filed) => filed.interviewerId === viewerId);
@@ -180,13 +219,83 @@ export class Loop {
       }
       const recusal = recusals.find((filed) => filed.interviewerId === interviewerId);
       if (recusal !== undefined) {
-        const recused: RecusedView = { status: 'RECUSED', interviewerId, reason: recusal.reason };
+        const recused: RecusedView = {
+          status: 'RECUSED',
+          interviewerId,
+          reason: this.#store.readText(ref, recusal.reasonDigest),
+        };
         return Object.freeze(recused);
       }
       const pending: PendingView = { status: 'PENDING', interviewerId };
       return Object.freeze(pending);
     });
     return Object.freeze(views);
+  }
+
+  readText(candidateRef: string, digest: string): TextRead {
+    const assignment = this.#panel(candidateRef);
+    return this.#store.readText(
+      assignment.candidateRef,
+      requireText(digest, 'digest', 'INVALID_DIGEST'),
+    );
+  }
+
+  readDisplayName(candidateRef: string): TextRead | undefined {
+    const assignment = this.#panel(candidateRef);
+    const digest = assignment.displayNameDigest;
+    return digest === null
+      ? undefined
+      : this.#store.readText(assignment.candidateRef, digest);
+  }
+
+  eraseCandidate(candidateRef: string, request: ErasureRequest): Erasure {
+    const assignment = this.#panel(candidateRef);
+    const ref = assignment.candidateRef;
+    const by = requireText(request.by, 'by', 'INVALID_ERASURE');
+    const reason = requireText(request.reason, 'reason', 'INVALID_ERASURE');
+    const erasedAt = requireInstant(request.at ?? new Date(), 'at', 'INVALID_ERASURE');
+    const tombstone: Tombstone = Object.freeze({ erasedAt, by });
+    const kept = this.#store.listTexts(ref);
+    for (const read of kept) {
+      if (read.status === 'PRESENT') {
+        this.#store.eraseText(ref, read.digest, tombstone);
+      }
+    }
+    const digests = kept.map((read) => read.digest).sort();
+    this.#append(ref, 'erasure', {
+      candidateRef: ref,
+      by,
+      reasonDigest: digestOf(reason),
+      erasedAt,
+      digests: [...digests],
+    });
+    const erasure: Erasure = { candidateRef: ref, by, erasedAt, digests: Object.freeze(digests) };
+    return Object.freeze(erasure);
+  }
+
+  setRetention(candidateRef: string, until: string | Date): Retention {
+    const assignment = this.#panel(candidateRef);
+    const retention: Retention = Object.freeze({
+      candidateRef: assignment.candidateRef,
+      until: requireInstant(until, 'until', 'INVALID_RETENTION'),
+    });
+    this.#store.writeRetention(retention);
+    return retention;
+  }
+
+  dueForErasure(now: string | Date = new Date()): readonly Retention[] {
+    const at = Date.parse(requireInstant(now, 'now', 'INVALID_RETENTION'));
+    const due = this.#store
+      .listRetentions()
+      .filter(
+        (retention) =>
+          Date.parse(retention.until) <= at &&
+          this.#store
+            .listTexts(retention.candidateRef)
+            .some((read) => read.status === 'PRESENT'),
+      )
+      .sort(byUntil);
+    return Object.freeze(due);
   }
 
   chain(candidateRef: string): readonly ChainEntry[] {
@@ -231,6 +340,13 @@ export class Loop {
       chain: Object.freeze([...chain]),
     };
     return Object.freeze(debrief);
+  }
+
+  #resolver(candidateRef: string, card: Scorecard): TextResolver {
+    return (digest) => {
+      const stored = this.#store.readText(candidateRef, digest);
+      return stored.status === 'MISSING' ? readDraftText(card, digest) : stored;
+    };
   }
 
   #recheck(candidateRef: string, card: Scorecard, chain: readonly ChainEntry[]): void {
@@ -284,6 +400,32 @@ export class Loop {
 function viewerIdOf(viewer: ViewerRef): string {
   const id = typeof viewer === 'string' ? viewer : viewer.id;
   return requireText(id, 'viewer id', 'INVALID_VIEWER');
+}
+
+function byUntil(left: Retention, right: Retention): number {
+  const first = `${left.until}\u0000${left.candidateRef}`;
+  const second = `${right.until}\u0000${right.candidateRef}`;
+  if (first < second) {
+    return -1;
+  }
+  return first > second ? 1 : 0;
+}
+
+function requireInstant(value: unknown, field: string, code: string): string {
+  if (value instanceof Date) {
+    if (Number.isNaN(value.getTime())) {
+      throw new SealedLoopError(code, `${field} must be a valid date`);
+    }
+    return value.toISOString();
+  }
+  if (typeof value === 'string') {
+    const parsed = Date.parse(value);
+    if (Number.isNaN(parsed)) {
+      throw new SealedLoopError(code, `${field} must be an ISO 8601 instant`);
+    }
+    return new Date(parsed).toISOString();
+  }
+  throw new SealedLoopError(code, `${field} must be an ISO 8601 instant or a Date`);
 }
 
 function requireText(value: unknown, field: string, code: string): string {

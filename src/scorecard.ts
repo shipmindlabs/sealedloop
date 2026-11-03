@@ -2,6 +2,8 @@ import { SealedLoopError } from './errors.ts';
 import { NOT_ASSESSED } from './rating.ts';
 import type { Rating } from './rating.ts';
 import type { Competency, Rubric } from './rubric.ts';
+import { digestOf, missingText, presentText } from './vault.ts';
+import type { TextRead, TextResolver } from './vault.ts';
 
 export interface ScorecardIdentity {
   readonly loopId: string;
@@ -11,7 +13,7 @@ export interface ScorecardIdentity {
 
 export interface EvidenceNote {
   readonly competencyId: string;
-  readonly text: string;
+  readonly digest: string;
 }
 
 export interface Scorecard {
@@ -22,6 +24,7 @@ export interface Scorecard {
   readonly interviewerId: string;
   readonly ratings: Readonly<Record<string, Rating>>;
   readonly evidence: readonly EvidenceNote[];
+  readonly texts: Readonly<Record<string, string>>;
 }
 
 export function draftScorecard(rubric: Rubric, identity: ScorecardIdentity): Scorecard {
@@ -36,6 +39,7 @@ export function draftScorecard(rubric: Rubric, identity: ScorecardIdentity): Sco
     interviewerId: requireText(identity.interviewerId, 'interviewerId'),
     ratings: {},
     evidence: [],
+    texts: {},
   });
 }
 
@@ -59,11 +63,29 @@ export function addEvidence(card: Scorecard, competencyId: string, text: string)
       `evidence for ${competency.id} must be a string`,
     );
   }
-  const note = { competencyId: competency.id, text: text.normalize('NFC') };
-  return freezeCard({ ...card, evidence: [...card.evidence, note] });
+  const written = text.normalize('NFC');
+  const digest = digestOf(written);
+  const note: EvidenceNote = { competencyId: competency.id, digest };
+  return freezeCard({
+    ...card,
+    evidence: [...card.evidence, note],
+    texts: { ...card.texts, [digest]: written },
+  });
 }
 
-export function checkSubmittable(card: Scorecard): void {
+export function readDraftText(card: Scorecard, digest: string): TextRead {
+  const text = card.texts[digest];
+  return text === undefined ? missingText(digest) : presentText(digest, text);
+}
+
+export function redactScorecard(card: Scorecard): Scorecard {
+  return freezeCard({ ...card, texts: {} });
+}
+
+export function checkSubmittable(
+  card: Scorecard,
+  resolve: TextResolver = (digest) => readDraftText(card, digest),
+): void {
   const minChars = card.rubric.minEvidenceChars;
   for (const competency of card.rubric.competencies) {
     const rating = card.ratings[competency.id];
@@ -77,15 +99,21 @@ export function checkSubmittable(card: Scorecard): void {
     if (edge === null) {
       continue;
     }
-    const backed = card.evidence.some(
-      (note) => note.competencyId === competency.id && countChars(note.text) >= minChars,
+    const filed = card.evidence
+      .filter((note) => note.competencyId === competency.id)
+      .map((note) => resolve(note.digest));
+    const backed = filed.some(
+      (read) => read.status === 'PRESENT' && countChars(read.text) >= minChars,
     );
-    if (!backed) {
-      throw new SealedLoopError(
-        'EVIDENCE_REQUIRED',
-        `${competency.id} rests on the ${edge} anchor ${rating} with no evidence note of ${minChars} characters or more`,
-      );
+    if (backed) {
+      continue;
     }
+    throw new SealedLoopError(
+      'EVIDENCE_REQUIRED',
+      filed.some((read) => read.status === 'ERASED')
+        ? `${competency.id} rests on the ${edge} anchor ${rating} and the evidence note behind it has been erased`
+        : `${competency.id} rests on the ${edge} anchor ${rating} with no evidence note of ${minChars} characters or more`,
+    );
   }
 }
 
@@ -149,6 +177,7 @@ function display(value: unknown): string {
 
 function freezeCard(card: Scorecard): Scorecard {
   Object.freeze(card.ratings);
+  Object.freeze(card.texts);
   for (const note of card.evidence) {
     Object.freeze(note);
   }
