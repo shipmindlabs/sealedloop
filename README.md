@@ -4,13 +4,15 @@ An interview-loop engine: a frozen rubric, sealed independent scorecards, rating
 anchored levels backed by evidence, and a declared aggregation rule — so a hiring decision
 can be traced back to what each interviewer actually observed.
 
-Four invariants are in place so far: **a rubric is identified by the hash of its own
+Five invariants are in place so far: **a rubric is identified by the hash of its own
 content, and scorecards that rest on two different rubrics are refused instead of
 averaged**; **a rating is an anchor of that competency or the explicit value
 `NOT_ASSESSED` — never a bare number, never silence**; **another interviewer's card
-reads as `SEALED` until you have submitted or recused, and no role buys a look**; and
-**every submission is committed to an append-only hash chain, so a card edited behind the
-API's back is named when the debrief opens.**
+reads as `SEALED` until you have submitted or recused, and no role buys a look**; **every
+submission is committed to an append-only hash chain, so a card edited behind the API's
+back is named when the debrief opens**; and **the free text sits in an erasable
+per-candidate vault keyed by digest, so erasing a candidate leaves a tombstone and the
+chain still verifies.**
 
 ## Requirements
 
@@ -89,6 +91,10 @@ untouched.
 or an anchor belonging to another competency is refused with `OFF_SCALE`; an unknown
 competency with `UNKNOWN_COMPETENCY`.
 
+`addEvidence` files the digest of the note under the competency and keeps the text beside it
+on the draft, where `readDraftText(card, digest)` reads it back. On `submit` the text moves
+into the candidate's vault in the `Store` and the filed card keeps digests only.
+
 `checkSubmittable` refuses a card where a competency was never given a value
 (`MISSING_RATING` — leaving it out is not the same as saying `NOT_ASSESSED`), and one where
 a top or bottom anchor has no evidence note filed under that competency holding at least
@@ -104,7 +110,7 @@ returns the declared level of that anchor.
 import { Loop, MemoryStore } from 'sealedloop';
 
 const loop = new Loop({ loopId: 'loop-14', store: new MemoryStore() });
-loop.assign('cand-7', ['eng-3', 'eng-4', 'eng-5']);
+loop.assign('cand-7', ['eng-3', 'eng-4', 'eng-5'], { displayName: 'Ada Lovelace' });
 
 loop.submit(card); // the card above, from eng-3; checkSubmittable runs again here
 
@@ -126,11 +132,14 @@ loop.openDebrief('cand-7', { id: 'hm-1', role: 'hiring-manager' });
 Until the viewer has submitted or recused for that candidate, every other interviewer reads
 as `{ status: 'SEALED', interviewerId }` and nothing else — no ratings, no evidence, not even
 whether a card exists. The viewer's own entry is never sealed: it is `PENDING`, `SUBMITTED`
-with the card in full, or `RECUSED` with the reason.
+with the card in full, or `RECUSED` with the reason read out of the vault.
 
 A viewer is an id or `{ id, role }`. The role is accepted and then carries no weight:
 `{ id: 'hm-1', role: 'hiring-manager' }` reads what any other outsider reads. What unseals a
 panel is having filed, not a title.
+
+The optional `displayName` is kept as a digest on the assignment, never as text; it is the
+only place a candidate's name enters the loop at all.
 
 `recuse` is final. A later `submit` for that candidate throws `RECUSED`, a second recusal
 throws it too, and recusing after submitting throws `ALREADY_SUBMITTED`. `submit` also
@@ -143,22 +152,23 @@ neither submitted nor recused, naming who is missing. Once the panel is complete
 every card, every recusal, the chain, and the one `rubricHash` they share — `null` if
 everybody recused.
 
-`Store` is the whole persistence seam: assignments, cards, recusals, chain entries and the
-salt kept beside each sealed card. `MemoryStore` keeps a loop in process, and
-`new Loop({ loopId })` makes one for you.
+`Store` is the whole persistence seam: assignments, cards, recusals, chain entries, the salt
+kept beside each sealed card, the per-candidate text vault and the retention dates.
+`MemoryStore` keeps a loop in process, and `new Loop({ loopId })` makes one for you.
 
 ### The commitment chain
 
 Each candidate has an append-only chain of entries `{ seq, prev, kind, body, hash }`, where
 `prev` is the hash of the entry before it and `hash` is the SHA-256 of the canonical form of
-`{ seq, prev, kind, body }`. `assign` writes one entry, `submit` writes a `commit` entry and
-`recuse` writes a `recuse` entry holding a digest of the reason rather than its text.
+`{ seq, prev, kind, body }`. `assign` writes one entry, `submit` writes a `commit` entry,
+`recuse` writes a `recuse` entry holding a digest of the reason rather than its text, and
+`eraseCandidate` writes an `erasure` entry.
 
 ```ts
 import { verifyChain } from 'sealedloop';
 
 loop.chain('cand-7');
-// [ { seq: 0, prev: null, kind: 'assign', body: { candidateRef, interviewerIds }, hash },
+// [ { seq: 0, prev: null, kind: 'assign', body: { candidateRef, interviewerIds, displayNameDigest }, hash },
 //   { seq: 1, prev: '…', kind: 'commit', body: { candidateRef, interviewerId, commitment }, hash } ]
 
 verifyChain(loop.chain('cand-7')); // { ok: true }
@@ -179,6 +189,47 @@ the first broken `seq`.
 `firstBroken` is the first `seq` at which the chain stops holding — so a deleted middle entry
 is named by its own `seq`, and an edited one by its.
 
+### Erasable text and retention
+
+Interview notes, recusal reasons and the candidate display name never sit on a card, on a
+recusal or in a chain entry. Those keep the SHA-256 digest of the NFC-normalized text; the
+text itself lives in a per-candidate vault in the `Store`, keyed by that digest.
+
+```ts
+loop.readText('cand-7', digest);
+// { status: 'PRESENT', digest, text: 'Walked a rollback plan for the payment path.' }
+loop.readDisplayName('cand-7'); // the same shape, or undefined if none was given
+
+const erasure = loop.eraseCandidate('cand-7', {
+  by: 'dpo-1',
+  reason: 'The candidate asked for erasure.',
+});
+erasure.digests; // every digest the vault held, all of them kept
+
+loop.readText('cand-7', digest);
+// { status: 'ERASED', digest, erasedAt: '2026-11-03T10:00:00.000Z', by: 'dpo-1' }
+
+verifyChain(loop.chain('cand-7')); // still { ok: true }
+```
+
+`eraseCandidate(candidateRef, { by, reason, at })` replaces every text in that candidate's
+vault with a tombstone `{ erasedAt, by }`, keeps every digest, and appends an `erasure`
+entry naming the digests, the eraser, the instant and the digest of the stated reason. It
+removes nothing the chain or the commitments rest on, so `verifyChain` and the recomputed
+commitments still pass afterwards, and a debrief opened after an erasure carries the same
+evidence digests as one opened before it. `at` defaults to now; a second erasure leaves the
+first tombstone in place.
+
+A read is one of three answers and never an empty string: `PRESENT` with the text, `ERASED`
+with `erasedAt` and `by`, `MISSING` for a digest the vault never held — so an erased note is
+reported as erased rather than as absent. Erased text backs nothing: a card whose top or
+bottom anchor rests on an erased note is refused with `EVIDENCE_REQUIRED`, and filing the
+same text again does not reopen the tombstone.
+
+`setRetention(candidateRef, until)` records a date and `dueForErasure(now)` lists the
+candidates past theirs that still hold text, earliest first. Nothing is erased automatically:
+the list is for a person or a job to act on.
+
 ## How the hash is formed
 
 `canonicalize` serializes a value per RFC 8785: object keys sorted by UTF-16 code unit,
@@ -194,10 +245,11 @@ Every failure is a `SealedLoopError` carrying a string `code`: `CANONICAL_*` for
 no canonical form, `INVALID_RUBRIC` for a rubric that cannot be frozen as given,
 `RUBRIC_MISMATCH`, `EMPTY_CARD_SET` and `MISSING_RUBRIC_HASH` for scorecard sets,
 `INVALID_SCORECARD`, `INVALID_EVIDENCE`, `UNKNOWN_COMPETENCY`, `OFF_SCALE`,
-`MISSING_RATING` and `EVIDENCE_REQUIRED` for a single card, and `INVALID_LOOP`,
+`MISSING_RATING` and `EVIDENCE_REQUIRED` for a single card, `INVALID_LOOP`,
 `INVALID_ASSIGNMENT`, `ALREADY_ASSIGNED`, `UNKNOWN_CANDIDATE`, `NOT_ASSIGNED`, `WRONG_LOOP`,
 `ALREADY_SUBMITTED`, `RECUSED`, `INVALID_RECUSAL`, `INVALID_VIEWER`, `NOT_ALL_IN` and
-`TAMPERED` for the loop.
+`TAMPERED` for the loop, and `INVALID_DIGEST`, `INVALID_ERASURE` and `INVALID_RETENTION`
+for the vault.
 
 ## Tests
 
@@ -208,12 +260,18 @@ npm test
 ## Limits
 
 - Anyone who reads the storage directly bypasses sealing. Sealing is a rule of this API, not
-  encryption: a `Store` holds plain cards, so a database client, a backup or a debug log sees
-  all of them.
+  encryption: a `Store` holds plain cards and a vault of plain notes, so a database client, a
+  backup or a debug log sees all of them.
 - The chain catches an edited card, not a rewritten store. Whoever can change cards, salts
   and entries together can recompute a consistent history; what the chain takes away is the
   quiet single-row edit. Copy the head hash somewhere that writer does not control if you
   need more than that.
+- Erasure keeps every digest, because the commitments rest on them. A digest does not read
+  back as text, but it confirms a guess: anyone holding a copy of a note can check that it
+  was the note erased.
+- Nothing erases itself and nothing expires. `dueForErasure` lists what is past its date;
+  `eraseCandidate` is someone's decision, it takes the whole vault of one candidate rather
+  than a single note, and a backup taken before it still holds the text.
 - Cross-card aggregation and the declared decision rule are still to come. A debrief hands
   you every card; it does not score them.
 - A panel is assigned once per candidate. `assign` on a candidate who already has one throws
