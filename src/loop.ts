@@ -1,11 +1,18 @@
 import { commitmentOf, newSalt, nextEntry, verifyChain } from './chain.ts';
 import type { ChainEntry } from './chain.ts';
 import { SealedLoopError } from './errors.ts';
+import type { Rating } from './rating.ts';
 import { assertSameRubric } from './rubric.ts';
-import { checkSubmittable, readDraftText, redactScorecard } from './scorecard.ts';
+import {
+  checkSubmittable,
+  freezeAfterReveal,
+  readDraftText,
+  redactScorecard,
+  resolveRating,
+} from './scorecard.ts';
 import type { Scorecard } from './scorecard.ts';
 import { MemoryStore } from './store.ts';
-import type { Assignment, Recusal, Retention, Store } from './store.ts';
+import type { Amendment, Assignment, Recusal, Retention, Reveal, Store } from './store.ts';
 import { digestOf } from './vault.ts';
 import type { TextRead, TextResolver, Tombstone } from './vault.ts';
 
@@ -20,6 +27,11 @@ export type ViewerRef = string | Viewer;
 
 export interface AssignOptions {
   readonly displayName?: string;
+}
+
+export interface AmendRequest {
+  readonly by: string;
+  readonly reason: string;
 }
 
 export interface SealedView {
@@ -141,6 +153,13 @@ export class Loop {
     if (!assignment.interviewerIds.includes(interviewerId)) {
       throw new SealedLoopError('NOT_ASSIGNED', `${interviewerId} is not on the panel for ${ref}`);
     }
+    const reveal = this.#store.readReveal(ref);
+    if (reveal !== undefined) {
+      throw new SealedLoopError(
+        'FROZEN_AFTER_REVEAL',
+        `the cards for ${ref} were revealed at ${reveal.revealedAt}; file an amendment instead of a card`,
+      );
+    }
     if (this.#recusalOf(ref, interviewerId) !== undefined) {
       throw new SealedLoopError(
         'RECUSED',
@@ -198,12 +217,84 @@ export class Loop {
     return recusal;
   }
 
+  amend(
+    cardId: string,
+    competencyId: string,
+    level: Rating,
+    request: AmendRequest,
+  ): Amendment {
+    const card = this.#card(cardId);
+    const assignment = this.#panel(card.candidateRef);
+    const ref = assignment.candidateRef;
+    const by = requireText(request.by, 'by', 'INVALID_AMENDMENT');
+    if (by !== card.interviewerId) {
+      throw new SealedLoopError(
+        'NOT_AUTHOR',
+        `${by} did not write the card ${card.interviewerId} filed for ${ref}`,
+      );
+    }
+    if (this.#store.readReveal(ref) === undefined) {
+      throw new SealedLoopError(
+        'NOT_REVEALED',
+        `the cards for ${ref} have not been revealed; a filed card stands until the debrief opens`,
+      );
+    }
+    const reason = requireText(request.reason, 'reason', 'INVALID_AMENDMENT');
+    const resolved = resolveRating(card.rubric, competencyId, level);
+    const reasonDigest = digestOf(reason);
+    const entry = this.#append(ref, 'amend', {
+      candidateRef: ref,
+      cardId: card.cardId,
+      interviewerId: card.interviewerId,
+      competencyId: resolved.competencyId,
+      level: resolved.rating,
+      by,
+      reasonDigest,
+      afterReveal: true,
+    });
+    this.#store.writeText(ref, reasonDigest, reason);
+    const amendment: Amendment = Object.freeze({
+      candidateRef: ref,
+      cardId: card.cardId,
+      interviewerId: card.interviewerId,
+      competencyId: resolved.competencyId,
+      level: resolved.rating,
+      by,
+      reasonDigest,
+      afterReveal: true as const,
+      seq: entry.seq,
+    });
+    this.#store.writeAmendment(amendment);
+    return amendment;
+  }
+
+  currentRatings(cardId: string): Readonly<Record<string, Rating>> {
+    const card = this.#card(cardId);
+    const ratings: Record<string, Rating> = { ...card.ratings };
+    for (const amendment of this.#store.readAmendments(card.candidateRef)) {
+      if (amendment.cardId === card.cardId) {
+        ratings[amendment.competencyId] = amendment.level;
+      }
+    }
+    return Object.freeze(ratings);
+  }
+
+  amendmentsAfterReveal(candidateRef: string): readonly Amendment[] {
+    const assignment = this.#panel(candidateRef);
+    return Object.freeze(
+      this.#store
+        .readAmendments(assignment.candidateRef)
+        .filter((amendment) => amendment.afterReveal),
+    );
+  }
+
   readCards(viewer: ViewerRef, candidateRef: string): readonly CardView[] {
     const assignment = this.#panel(candidateRef);
     const ref = assignment.candidateRef;
     const viewerId = viewerIdOf(viewer);
     const cards = this.#store.readCards(ref);
     const recusals = this.#store.readRecusals(ref);
+    const revealedAt = this.#store.readReveal(ref)?.revealedAt ?? null;
     const viewerIsIn =
       cards.some((filed) => filed.interviewerId === viewerId) ||
       recusals.some((filed) => filed.interviewerId === viewerId);
@@ -214,7 +305,11 @@ export class Loop {
       }
       const card = cards.find((filed) => filed.interviewerId === interviewerId);
       if (card !== undefined) {
-        const submitted: SubmittedView = { status: 'SUBMITTED', interviewerId, card };
+        const submitted: SubmittedView = {
+          status: 'SUBMITTED',
+          interviewerId,
+          card: revealedAt === null ? card : freezeAfterReveal(card, revealedAt),
+        };
         return Object.freeze(submitted);
       }
       const recusal = recusals.find((filed) => filed.interviewerId === interviewerId);
@@ -331,15 +426,31 @@ export class Loop {
     for (const card of cards) {
       this.#recheck(ref, card, chain);
     }
+    const revealedAt = this.#markRevealed(ref, openedBy);
+    const revealed = cards.map((card) => freezeAfterReveal(card, revealedAt));
     const debrief: Debrief = {
       candidateRef: ref,
       openedBy,
-      rubricHash: cards.length === 0 ? null : assertSameRubric(cards),
-      cards: Object.freeze([...cards]),
+      rubricHash: revealed.length === 0 ? null : assertSameRubric(revealed),
+      cards: Object.freeze(revealed),
       recusals: Object.freeze([...recusals]),
       chain: Object.freeze([...chain]),
     };
     return Object.freeze(debrief);
+  }
+
+  #markRevealed(candidateRef: string, openedBy: string): string {
+    const kept = this.#store.readReveal(candidateRef);
+    if (kept !== undefined) {
+      return kept.revealedAt;
+    }
+    const reveal: Reveal = Object.freeze({
+      candidateRef,
+      openedBy,
+      revealedAt: new Date().toISOString(),
+    });
+    this.#store.writeReveal(reveal);
+    return reveal.revealedAt;
   }
 
   #resolver(candidateRef: string, card: Scorecard): TextResolver {
@@ -384,6 +495,15 @@ export class Loop {
       );
     }
     return assignment;
+  }
+
+  #card(cardId: unknown): Scorecard {
+    const id = typeof cardId === 'string' ? cardId.normalize('NFC') : '';
+    const card = this.#store.readCardById(id);
+    if (card === undefined) {
+      throw new SealedLoopError('UNKNOWN_CARD', `no card is filed under ${display(cardId)}`);
+    }
+    return card;
   }
 
   #cardOf(candidateRef: string, interviewerId: string): Scorecard | undefined {

@@ -1,3 +1,4 @@
+import { canonicalize } from './canonical.ts';
 import { SealedLoopError } from './errors.ts';
 import { NOT_ASSESSED } from './rating.ts';
 import type { Rating } from './rating.ts';
@@ -16,12 +17,19 @@ export interface EvidenceNote {
   readonly digest: string;
 }
 
+export interface ResolvedRating {
+  readonly competencyId: string;
+  readonly rating: Rating;
+}
+
 export interface Scorecard {
+  readonly cardId: string;
   readonly rubric: Rubric;
   readonly rubricHash: string;
   readonly loopId: string;
   readonly candidateRef: string;
   readonly interviewerId: string;
+  readonly revealedAt: string | null;
   readonly ratings: Readonly<Record<string, Rating>>;
   readonly evidence: readonly EvidenceNote[];
   readonly texts: Readonly<Record<string, string>>;
@@ -31,20 +39,29 @@ export function draftScorecard(rubric: Rubric, identity: ScorecardIdentity): Sco
   if (typeof rubric.rubricHash !== 'string' || rubric.rubricHash === '') {
     throw new SealedLoopError('MISSING_RUBRIC_HASH', 'the rubric carries no rubricHash');
   }
+  const loopId = requireText(identity.loopId, 'loopId');
+  const candidateRef = requireText(identity.candidateRef, 'candidateRef');
+  const interviewerId = requireText(identity.interviewerId, 'interviewerId');
   return freezeCard({
+    cardId: digestOf(canonicalize({ loopId, candidateRef, interviewerId })),
     rubric,
     rubricHash: rubric.rubricHash,
-    loopId: requireText(identity.loopId, 'loopId'),
-    candidateRef: requireText(identity.candidateRef, 'candidateRef'),
-    interviewerId: requireText(identity.interviewerId, 'interviewerId'),
+    loopId,
+    candidateRef,
+    interviewerId,
+    revealedAt: null,
     ratings: {},
     evidence: [],
     texts: {},
   });
 }
 
-export function setRating(card: Scorecard, competencyId: string, rating: Rating): Scorecard {
-  const competency = requireCompetency(card.rubric, competencyId);
+export function resolveRating(
+  rubric: Rubric,
+  competencyId: string,
+  rating: Rating,
+): ResolvedRating {
+  const competency = requireCompetency(rubric, competencyId);
   const value = typeof rating === 'string' ? rating.normalize('NFC') : rating;
   if (value !== NOT_ASSESSED && !competency.anchors.some((anchor) => anchor.id === value)) {
     throw new SealedLoopError(
@@ -52,16 +69,23 @@ export function setRating(card: Scorecard, competencyId: string, rating: Rating)
       `${display(rating)} is not an anchor of ${competency.id}; rate on an anchor id or NOT_ASSESSED`,
     );
   }
-  return freezeCard({ ...card, ratings: { ...card.ratings, [competency.id]: value } });
+  return { competencyId: competency.id, rating: value };
+}
+
+export function setRating(card: Scorecard, competencyId: string, rating: Rating): Scorecard {
+  checkOpen(card);
+  const resolved = resolveRating(card.rubric, competencyId, rating);
+  return freezeCard({
+    ...card,
+    ratings: { ...card.ratings, [resolved.competencyId]: resolved.rating },
+  });
 }
 
 export function addEvidence(card: Scorecard, competencyId: string, text: string): Scorecard {
+  checkOpen(card);
   const competency = requireCompetency(card.rubric, competencyId);
   if (typeof text !== 'string') {
-    throw new SealedLoopError(
-      'INVALID_EVIDENCE',
-      `evidence for ${competency.id} must be a string`,
-    );
+    throw new SealedLoopError('INVALID_EVIDENCE', `evidence for ${competency.id} must be a string`);
   }
   const written = text.normalize('NFC');
   const digest = digestOf(written);
@@ -80,6 +104,10 @@ export function readDraftText(card: Scorecard, digest: string): TextRead {
 
 export function redactScorecard(card: Scorecard): Scorecard {
   return freezeCard({ ...card, texts: {} });
+}
+
+export function freezeAfterReveal(card: Scorecard, revealedAt: string): Scorecard {
+  return card.revealedAt === revealedAt ? card : freezeCard({ ...card, revealedAt });
 }
 
 export function checkSubmittable(
@@ -129,12 +157,18 @@ export function anchorPosition(rating: Rating, competency?: Competency): number 
   }
   const anchor = competency.anchors.find((candidate) => candidate.id === rating);
   if (anchor === undefined) {
-    throw new SealedLoopError(
-      'OFF_SCALE',
-      `${display(rating)} is not an anchor of ${competency.id}`,
-    );
+    throw new SealedLoopError('OFF_SCALE', `${display(rating)} is not an anchor of ${competency.id}`);
   }
   return anchor.level;
+}
+
+function checkOpen(card: Scorecard): void {
+  if (card.revealedAt !== null) {
+    throw new SealedLoopError(
+      'FROZEN_AFTER_REVEAL',
+      `the cards for ${card.candidateRef} were revealed at ${card.revealedAt}; amend the card instead of changing it`,
+    );
+  }
 }
 
 function edgeName(competency: Competency, rating: Rating): string | null {

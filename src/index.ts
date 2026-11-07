@@ -4,6 +4,7 @@ export type { ChainCheck, ChainEntry } from './chain.ts';
 export { SealedLoopError } from './errors.ts';
 export { Loop } from './loop.ts';
 export type {
+  AmendRequest,
   AssignOptions,
   CardView,
   Debrief,
@@ -46,7 +47,15 @@ export {
 } from './scorecard.ts';
 export type { EvidenceNote, Scorecard, ScorecardIdentity } from './scorecard.ts';
 export { MemoryStore } from './store.ts';
-export type { Assignment, CommitSeal, Recusal, Retention, Store } from './store.ts';
+export type {
+  Amendment,
+  Assignment,
+  CommitSeal,
+  Recusal,
+  Retention,
+  Reveal,
+  Store,
+} from './store.ts';
 export { digestOf } from './vault.ts';
 export type {
   ErasedText,
