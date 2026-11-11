@@ -327,6 +327,21 @@ export class Loop {
     return Object.freeze(views);
   }
 
+  revealedCards(candidateRef: string): readonly Scorecard[] {
+    const assignment = this.#panel(candidateRef);
+    const ref = assignment.candidateRef;
+    const reveal = this.#store.readReveal(ref);
+    if (reveal === undefined) {
+      throw new SealedLoopError(
+        'NOT_REVEALED',
+        `the cards for ${ref} have not been revealed; open the debrief before reading the panel`,
+      );
+    }
+    return Object.freeze(
+      this.#store.readCards(ref).map((card) => freezeAfterReveal(card, reveal.revealedAt)),
+    );
+  }
+
   readText(candidateRef: string, digest: string): TextRead {
     const assignment = this.#panel(candidateRef);
     return this.#store.readText(

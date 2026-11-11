@@ -19,6 +19,17 @@ export type {
   ViewerRef,
   ViewerRole,
 } from './loop.ts';
+export { MIN_RATINGS_PER_MUST_HAVE, evaluateRule } from './outcome.ts';
+export type {
+  BlockedReason,
+  CompetencyTrace,
+  GateStatus,
+  GateTrace,
+  RatingTrace,
+  RuleOutcome,
+  RuleStatus,
+  RuleTrace,
+} from './outcome.ts';
 export { NOT_ASSESSED } from './rating.ts';
 export type { Rating } from './rating.ts';
 export {
