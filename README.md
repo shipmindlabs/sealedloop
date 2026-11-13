@@ -4,7 +4,7 @@ An interview-loop engine: a frozen rubric, sealed independent scorecards, rating
 anchored levels backed by evidence, and a declared aggregation rule — so a hiring decision
 can be traced back to what each interviewer actually observed.
 
-Six invariants are in place so far: **a rubric is identified by the hash of its own
+Seven invariants are in place so far: **a rubric is identified by the hash of its own
 content, and scorecards that rest on two different rubrics are refused instead of
 averaged**; **a rating is an anchor of that competency or the explicit value
 `NOT_ASSESSED` — never a bare number, never silence**; **another interviewer's card
@@ -12,9 +12,11 @@ reads as `SEALED` until you have submitted or recused, and no role buys a look**
 submission is committed to an append-only hash chain, so a card edited behind the API's
 back is named when the debrief opens**; **the free text sits in an erasable
 per-candidate vault keyed by digest, so erasing a candidate leaves a tombstone and the
-chain still verifies**; and **once the debrief has revealed the cards a level stops moving
+chain still verifies**; **once the debrief has revealed the cards a level stops moving
 quietly: an amendment is filed beside the original, with a reason, and the original stays
-readable.**
+readable**; and **the rule judges each must-have alone, so a top anchor elsewhere never
+offsets a failed one, and a must-have carrying fewer than two independent ratings blocks
+the rule instead of passing it.**
 
 ## Requirements
 
@@ -198,6 +200,49 @@ each competency laid over them. `amendmentsAfterReveal(candidateRef)` lists ever
 the order it was filed, so a decision resting on an amended level can name who moved it, why,
 and the `seq` the move sits at in the chain.
 
+### A rule outcome, not a verdict
+
+```ts
+import { evaluateRule } from 'sealedloop';
+
+loop.openDebrief('cand-7', 'hm-1');
+const outcome = evaluateRule(loop, 'cand-7');
+
+outcome.status; // 'meets-rule', 'below-rule' or 'blocked' — never a hire or a no-hire
+outcome.trace.gates;
+// [ { competencyId: 'systems-design', bar: 2, lowerMedian: 3, counted: [3, 3],
+//     notAssessedBy: [], status: 'meets-bar', reason: null, ratings: [ … ] },
+//   { competencyId: 'testing', bar: 2, lowerMedian: 1, counted: [1, 1],
+//     notAssessedBy: [], status: 'below-bar', reason: null, ratings: [ … ] } ]
+outcome.trace.observed; // every competency that is not a must-have, traced and gating nothing
+```
+
+`evaluateRule(loop, candidateRef)` reads the revealed cards — before the debrief opens it
+throws `NOT_REVEALED` — and judges each must-have on its own. Within one competency it drops
+every `NOT_ASSESSED` rating, takes the anchor level of the rest, and asks whether the lower
+median of those levels reaches that competency's `bar`. Nothing is summed, averaged or
+weighted across competencies: a panel that saw a top anchor on everything else still reads
+`below-rule` when one must-have sits under its bar.
+
+A must-have carrying fewer than `MIN_RATINGS_PER_MUST_HAVE` (2) independently submitted
+ratings is not judged at all. The gate is `blocked` — `UNASSESSED_MUST_HAVE` when somebody
+filed `NOT_ASSESSED` there, `PANEL_TOO_SMALL` when the panel was simply too small — and the
+outcome is `blocked` with it. Those two are reasons in the trace rather than errors, and
+silence never passes: a must-have nobody could speak to blocks the rule instead of clearing
+it, which is also why a single-interviewer loop produces no outcome at all.
+
+Each entry in `ratings` names the interviewer, the card, the rating as the rule read it, its
+level and whether an amendment moved it — `evaluateRule` reads `currentRatings`, so an amended
+level is the one counted and the trace says whose it is.
+
+**Why there is no hiring decision here.** What this engine can hold honestly is a record: who
+observed what, against bars that were declared before anyone sat down, with the evidence and
+the amendments that produced each level. Who to hire turns on the team, the role, the other
+candidates and the risk somebody is willing to carry — none of which a scorecard knows. So the
+rule computes the one part that is checkable and hands back the trace that got there. A
+`meets-rule` is not an offer and a `below-rule` is not a rejection; both are a reading of the
+rubric, and the decision stays with the people who have to live with it.
+
 ### The commitment chain
 
 Each candidate has an append-only chain of entries `{ seq, prev, kind, body, hash }`, where
@@ -294,7 +339,8 @@ no canonical form, `INVALID_RUBRIC` for a rubric that cannot be frozen as given,
 `ALREADY_SUBMITTED`, `RECUSED`, `INVALID_RECUSAL`, `INVALID_VIEWER`, `NOT_ALL_IN` and
 `TAMPERED` for the loop, `FROZEN_AFTER_REVEAL`, `NOT_REVEALED`, `UNKNOWN_CARD`,
 `NOT_AUTHOR` and `INVALID_AMENDMENT` for a card after the reveal, and `INVALID_DIGEST`,
-`INVALID_ERASURE` and `INVALID_RETENTION` for the vault.
+`INVALID_ERASURE` and `INVALID_RETENTION` for the vault. A blocked gate is not one of them:
+`UNASSESSED_MUST_HAVE` and `PANEL_TOO_SMALL` are reasons carried in a rule trace.
 
 ## Tests
 
@@ -323,8 +369,14 @@ npm test
 - An amendment moves a level, not a note. `amend` takes a rating and a reason, evidence filed
   before the reveal stands as it is, and nothing re-runs `checkSubmittable`, so an amendment
   onto a top or bottom anchor is not asked for a new note.
-- Cross-card aggregation and the declared decision rule are still to come. A debrief hands
-  you every card and `currentRatings` hands a rule the amended levels; nothing scores them.
+- A rule outcome is not a decision and nothing enforces it. `evaluateRule` says whether the
+  bars the panel declared were reached; it does not rank one candidate against another, and
+  nothing here stops a loop that reads `below-rule` or `blocked` from going ahead anyway.
+- The median compares levels, not judgement. Two interviewers who read the same anchor
+  differently still yield two numbers, and the lower median takes the more cautious of them;
+  it does not notice that they disagreed about what they saw.
+- The two-rating floor is one constant for every competency. `MIN_RATINGS_PER_MUST_HAVE` is
+  2; per-competency floors, weighted competencies and tie-breaks are out of scope.
 - A panel is assigned once per candidate. `assign` on a candidate who already has one throws
   `ALREADY_ASSIGNED`; adding or dropping an interviewer mid-loop is out of scope.
 - A hash is an identity, not a signature. It proves two parties scored the same rubric
