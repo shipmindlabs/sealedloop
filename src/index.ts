@@ -60,9 +60,11 @@ export type { EvidenceNote, Scorecard, ScorecardIdentity } from './scorecard.ts'
 export { MemoryStore } from './store.ts';
 export type {
   Amendment,
+  Arbitration,
   Assignment,
   CommitSeal,
   Recusal,
+  Resolution,
   Retention,
   Reveal,
   Store,

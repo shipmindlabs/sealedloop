@@ -4,6 +4,8 @@ import type { Scorecard } from './scorecard.ts';
 import { erasedText, missingText, presentText } from './vault.ts';
 import type { TextRead, Tombstone } from './vault.ts';
 
+export type Resolution = 'meets-bar' | 'below-bar';
+
 export interface Assignment {
   readonly candidateRef: string;
   readonly interviewerIds: readonly string[];
@@ -41,6 +43,15 @@ export interface Amendment {
   readonly seq: number;
 }
 
+export interface Arbitration {
+  readonly candidateRef: string;
+  readonly competencyId: string;
+  readonly by: string;
+  readonly resolution: Resolution;
+  readonly reasonDigest: string;
+  readonly seq: number;
+}
+
 export interface Retention {
   readonly candidateRef: string;
   readonly until: string;
@@ -63,6 +74,8 @@ export interface Store {
   writeReveal(reveal: Reveal): void;
   readAmendments(candidateRef: string): readonly Amendment[];
   writeAmendment(amendment: Amendment): void;
+  readArbitrations(candidateRef: string): readonly Arbitration[];
+  writeArbitration(arbitration: Arbitration): void;
   readText(candidateRef: string, digest: string): TextRead;
   // A digest already in the vault keeps the record it has, so a tombstone never reopens.
   writeText(candidateRef: string, digest: string, text: string): void;
@@ -81,6 +94,7 @@ export class MemoryStore implements Store {
   readonly #seals = new Map<string, CommitSeal>();
   readonly #reveals = new Map<string, Reveal>();
   readonly #amendments = new Map<string, Amendment[]>();
+  readonly #arbitrations = new Map<string, Arbitration[]>();
   readonly #texts = new Map<string, Map<string, TextRead>>();
   readonly #retentions = new Map<string, Retention>();
 
@@ -146,6 +160,14 @@ export class MemoryStore implements Store {
 
   writeAmendment(amendment: Amendment): void {
     append(this.#amendments, amendment.candidateRef, amendment);
+  }
+
+  readArbitrations(candidateRef: string): readonly Arbitration[] {
+    return [...(this.#arbitrations.get(candidateRef) ?? [])];
+  }
+
+  writeArbitration(arbitration: Arbitration): void {
+    append(this.#arbitrations, arbitration.candidateRef, arbitration);
   }
 
   readText(candidateRef: string, digest: string): TextRead {
