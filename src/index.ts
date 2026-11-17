@@ -5,6 +5,7 @@ export { SealedLoopError } from './errors.ts';
 export { Loop } from './loop.ts';
 export type {
   AmendRequest,
+  ArbitrateRequest,
   AssignOptions,
   CardView,
   Debrief,
@@ -19,8 +20,14 @@ export type {
   ViewerRef,
   ViewerRole,
 } from './loop.ts';
-export { MIN_RATINGS_PER_MUST_HAVE, evaluateRule } from './outcome.ts';
+export {
+  MIN_ARBITRATION_SPREAD,
+  MIN_RATINGS_PER_MUST_HAVE,
+  evaluateRule,
+} from './outcome.ts';
 export type {
+  AgendaItem,
+  ArbitrationTrace,
   BlockedReason,
   CompetencyTrace,
   GateStatus,

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
+import { verifyChain } from '../src/chain.ts';
 import { SealedLoopError } from '../src/errors.ts';
 import { Loop } from '../src/loop.ts';
 import { MIN_RATINGS_PER_MUST_HAVE, evaluateRule } from '../src/outcome.ts';
@@ -12,11 +13,13 @@ import type { Rubric } from '../src/rubric.ts';
 import { addEvidence, draftScorecard, setRating } from '../src/scorecard.ts';
 import type { Scorecard } from '../src/scorecard.ts';
 import { MemoryStore } from '../src/store.ts';
+import type { Resolution } from '../src/store.ts';
 
 const LOOP = 'loop-14';
 const CAND = 'cand-7';
 const NOTE = 'Designed for failure, load and rollback on the whiteboard.';
 const AMEND_REASON = 'Re-read the transcript: the failing case was never run.';
+const ARB_REASON = 'The panel split; the follow-up on the retry path settled it.';
 
 type Ratings = Readonly<Record<string, Rating>>;
 type Filing = readonly [string, Ratings];
@@ -128,6 +131,9 @@ test('a top anchor elsewhere never offsets a failed must-have', () => {
   assert.equal(design.lowerMedian, 3);
   assert.deepEqual([...design.counted], [3, 3]);
   assert.equal(design.reason, null);
+  assert.equal(design.spread, 0);
+  assert.equal(design.split, false);
+  assert.equal(design.arbitration, null);
 
   const testing = gateOf(outcome, 'testing');
   assert.equal(testing.status, 'below-bar');
@@ -207,19 +213,147 @@ test('an unassessed must-have blocks and the rest of the panel still counts', ()
   assert.deepEqual([...rest.notAssessedBy], ['eng-5']);
 });
 
-test('the lower median reads a split panel', () => {
-  const split: readonly Filing[] = [
+test('the lower median reads a panel that agrees on the side of the bar', () => {
+  const outcome = evaluateRule(
+    opened([
+      ['eng-3', { ...TOP, 'systems-design': 'sd-working' }],
+      ['eng-4', TOP],
+      ['eng-5', TOP],
+    ]),
+    CAND,
+  );
+  assert.equal(outcome.status, 'meets-rule');
+  const design = gateOf(outcome, 'systems-design');
+  assert.deepEqual([...design.counted], [2, 3, 3]);
+  assert.equal(design.spread, 1);
+  assert.equal(design.split, false);
+  assert.equal(design.lowerMedian, 3);
+});
+
+test('a must-have the panel split on waits for an arbiter and is then decided', () => {
+  const loop = opened([
     ['eng-3', { ...TOP, 'systems-design': 'sd-novice' }],
     ['eng-4', TOP],
-  ];
-  const two = evaluateRule(opened(split), CAND);
-  assert.equal(two.status, 'below-rule');
-  assert.equal(gateOf(two, 'systems-design').lowerMedian, 1);
+  ]);
 
-  const third: Filing = ['eng-5', TOP];
-  const three = evaluateRule(opened([...split, third]), CAND);
-  assert.equal(three.status, 'meets-rule');
-  assert.equal(gateOf(three, 'systems-design').lowerMedian, 3);
+  const held = evaluateRule(loop, CAND);
+  assert.equal(held.status, 'blocked');
+  const waiting = gateOf(held, 'systems-design');
+  assert.equal(waiting.status, 'blocked');
+  assert.equal(waiting.reason, 'ARBITRATION_REQUIRED');
+  assert.equal(waiting.spread, 2);
+  assert.equal(waiting.split, true);
+  assert.equal(waiting.lowerMedian, 1);
+  assert.equal(waiting.arbitration, null);
+  assert.equal(gateOf(held, 'testing').status, 'meets-bar');
+
+  const arbitration = loop.arbitrate(CAND, 'systems-design', {
+    by: 'hm-1',
+    resolution: 'below-bar',
+    reason: ARB_REASON,
+  });
+  assert.equal(arbitration.seq, loop.chain(CAND).length - 1);
+  assert.deepEqual(verifyChain(loop.chain(CAND)), { ok: true });
+  assert.equal(loop.readText(CAND, arbitration.reasonDigest).status, 'PRESENT');
+  assert.deepEqual([...loop.arbitrations(CAND)], [arbitration]);
+
+  const decided = evaluateRule(loop, CAND);
+  assert.equal(decided.status, 'below-rule');
+  const settled = gateOf(decided, 'systems-design');
+  assert.equal(settled.status, 'below-bar');
+  assert.equal(settled.reason, null);
+  assert.equal(settled.arbitration?.by, 'hm-1');
+  assert.equal(settled.arbitration?.resolution, 'below-bar');
+  assert.equal(settled.arbitration?.seq, arbitration.seq);
+  assert.deepEqual([...settled.counted], [1, 3]);
+  assert.equal(settled.lowerMedian, 1);
+  assert.equal(loop.revealedCards(CAND)[0]!.ratings['systems-design'], 'sd-novice');
+});
+
+test('an interviewer who scored the competency is refused as arbiter', () => {
+  const of = rubric();
+  const loop = new Loop({ loopId: LOOP, store: new MemoryStore() });
+  loop.assign(CAND, ['eng-3', 'eng-4', 'eng-5']);
+  loop.submit(card(of, 'eng-3', { ...TOP, 'systems-design': 'sd-novice' }));
+  loop.submit(card(of, 'eng-4', TOP));
+  loop.recuse('eng-5', CAND, 'I referred this candidate.');
+
+  refusal(
+    () =>
+      loop.arbitrate(CAND, 'systems-design', {
+        by: 'hm-1',
+        resolution: 'meets-bar',
+        reason: ARB_REASON,
+      }),
+    'NOT_REVEALED',
+  );
+  loop.openDebrief(CAND, 'hm-1');
+
+  for (const by of ['eng-3', 'eng-4', 'eng-5']) {
+    refusal(
+      () =>
+        loop.arbitrate(CAND, 'systems-design', { by, resolution: 'meets-bar', reason: ARB_REASON }),
+      'ARBITER_INVOLVED',
+    );
+  }
+  refusal(
+    () => loop.arbitrate(CAND, 'vibes', { by: 'hm-1', resolution: 'meets-bar', reason: ARB_REASON }),
+    'UNKNOWN_COMPETENCY',
+  );
+  refusal(
+    () =>
+      loop.arbitrate(CAND, 'systems-design', { by: 'hm-1', resolution: 'meets-bar', reason: '  ' }),
+    'INVALID_ARBITRATION',
+  );
+  refusal(
+    () =>
+      loop.arbitrate(CAND, 'systems-design', {
+        by: 'hm-1',
+        resolution: 'split-the-difference' as unknown as Resolution,
+        reason: ARB_REASON,
+      }),
+    'INVALID_ARBITRATION',
+  );
+  refusal(
+    () =>
+      loop.arbitrate('cand-9', 'systems-design', {
+        by: 'hm-1',
+        resolution: 'meets-bar',
+        reason: ARB_REASON,
+      }),
+    'UNKNOWN_CANDIDATE',
+  );
+
+  loop.arbitrate(CAND, 'systems-design', {
+    by: 'hm-1',
+    resolution: 'meets-bar',
+    reason: ARB_REASON,
+  });
+  assert.equal(evaluateRule(loop, CAND).status, 'meets-rule');
+});
+
+test('the agenda puts the widest gap first and breaks ties by competency id', () => {
+  const loop = panelOf([
+    ['eng-3', { 'systems-design': 'sd-novice', testing: 'te-working', collaboration: 'co-novice' }],
+    ['eng-4', { 'systems-design': 'sd-strong', testing: 'te-strong', collaboration: 'co-working' }],
+  ]);
+  refusal(() => loop.debriefAgenda(CAND), 'NOT_REVEALED');
+
+  loop.openDebrief(CAND, 'hm-1');
+  const agenda = loop.debriefAgenda(CAND);
+  assert.deepEqual(
+    agenda.map((item) => [item.competencyId, item.spread, item.needsArbitration]),
+    [
+      ['systems-design', 2, true],
+      ['collaboration', 1, false],
+      ['testing', 1, false],
+    ],
+  );
+  assert.deepEqual([...agenda[0]!.counted], [1, 3]);
+  assert.equal(agenda[1]!.mustHave, false);
+  assert.equal(agenda[1]!.split, true);
+  assert.ok(Object.isFrozen(agenda));
+  assert.ok(Object.isFrozen(agenda[0]!));
 });
 
 test('an amendment is the level the rule reads', () => {
@@ -233,8 +367,9 @@ test('an amendment is the level the rule reads', () => {
   loop.amend(cardId, 'testing', 'te-novice', { by: 'eng-3', reason: AMEND_REASON });
 
   const outcome = evaluateRule(loop, CAND);
-  assert.equal(outcome.status, 'below-rule');
+  assert.equal(outcome.status, 'blocked');
   const testing = gateOf(outcome, 'testing');
+  assert.equal(testing.reason, 'ARBITRATION_REQUIRED');
   assert.deepEqual([...testing.counted], [1, 3]);
   assert.equal(testing.lowerMedian, 1);
   assert.deepEqual(
@@ -242,6 +377,9 @@ test('an amendment is the level the rule reads', () => {
     [true, false],
   );
   assert.equal(loop.revealedCards(CAND)[0]!.ratings['testing'], 'te-strong');
+
+  loop.arbitrate(CAND, 'testing', { by: 'hm-1', resolution: 'below-bar', reason: ARB_REASON });
+  assert.equal(evaluateRule(loop, CAND).status, 'below-rule');
 });
 
 test('a rule outcome needs the reveal and a panel', () => {
@@ -269,4 +407,5 @@ test('a panel that all recused is blocked and nothing is scored', () => {
   assert.deepEqual([...outcome.trace.gates], []);
   assert.deepEqual([...outcome.trace.observed], []);
   assert.deepEqual([...outcome.trace.submittedBy], []);
+  assert.deepEqual([...loop.debriefAgenda(CAND)], []);
 });

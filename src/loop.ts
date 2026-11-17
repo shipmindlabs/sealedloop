@@ -1,8 +1,12 @@
 import { commitmentOf, newSalt, nextEntry, verifyChain } from './chain.ts';
 import type { ChainEntry } from './chain.ts';
 import { SealedLoopError } from './errors.ts';
+import { evaluateRule } from './outcome.ts';
+import type { AgendaItem, CompetencyTrace } from './outcome.ts';
+import { NOT_ASSESSED } from './rating.ts';
 import type { Rating } from './rating.ts';
 import { assertSameRubric } from './rubric.ts';
+import type { Competency, Rubric } from './rubric.ts';
 import {
   checkSubmittable,
   freezeAfterReveal,
@@ -12,7 +16,16 @@ import {
 } from './scorecard.ts';
 import type { Scorecard } from './scorecard.ts';
 import { MemoryStore } from './store.ts';
-import type { Amendment, Assignment, Recusal, Retention, Reveal, Store } from './store.ts';
+import type {
+  Amendment,
+  Arbitration,
+  Assignment,
+  Recusal,
+  Resolution,
+  Retention,
+  Reveal,
+  Store,
+} from './store.ts';
 import { digestOf } from './vault.ts';
 import type { TextRead, TextResolver, Tombstone } from './vault.ts';
 
@@ -31,6 +44,12 @@ export interface AssignOptions {
 
 export interface AmendRequest {
   readonly by: string;
+  readonly reason: string;
+}
+
+export interface ArbitrateRequest {
+  readonly by: string;
+  readonly resolution: Resolution;
   readonly reason: string;
 }
 
@@ -288,6 +307,87 @@ export class Loop {
     );
   }
 
+  arbitrate(
+    candidateRef: string,
+    competencyId: string,
+    request: ArbitrateRequest,
+  ): Arbitration {
+    const assignment = this.#panel(candidateRef);
+    const ref = assignment.candidateRef;
+    if (this.#store.readReveal(ref) === undefined) {
+      throw new SealedLoopError(
+        'NOT_REVEALED',
+        `the cards for ${ref} have not been revealed; a split is read at the debrief`,
+      );
+    }
+    const by = requireText(request.by, 'by', 'INVALID_ARBITRATION');
+    const reason = requireText(request.reason, 'reason', 'INVALID_ARBITRATION');
+    const resolution = request.resolution;
+    if (resolution !== 'meets-bar' && resolution !== 'below-bar') {
+      throw new SealedLoopError(
+        'INVALID_ARBITRATION',
+        `resolution must be meets-bar or below-bar, not ${display(resolution)}`,
+      );
+    }
+    const cards = this.#store.readCards(ref);
+    const rubric = cards[0]?.rubric;
+    if (rubric === undefined) {
+      throw new SealedLoopError(
+        'INVALID_ARBITRATION',
+        `no card was filed for ${ref}; there is nothing to arbitrate`,
+      );
+    }
+    const competency = competencyOf(rubric, competencyId);
+    if (this.#recusalOf(ref, by) !== undefined) {
+      throw new SealedLoopError(
+        'ARBITER_INVOLVED',
+        `${by} recused from ${ref} and cannot arbitrate ${competency.id}`,
+      );
+    }
+    const own = cards.find((card) => card.interviewerId === by);
+    const rated = own === undefined ? undefined : this.currentRatings(own.cardId)[competency.id];
+    if (rated !== undefined && rated !== NOT_ASSESSED) {
+      throw new SealedLoopError(
+        'ARBITER_INVOLVED',
+        `${by} rated ${competency.id} for ${ref} and cannot arbitrate it`,
+      );
+    }
+    const reasonDigest = digestOf(reason);
+    const entry = this.#append(ref, 'arbitrate', {
+      candidateRef: ref,
+      competencyId: competency.id,
+      by,
+      resolution,
+      reasonDigest,
+    });
+    this.#store.writeText(ref, reasonDigest, reason);
+    const arbitration: Arbitration = Object.freeze({
+      candidateRef: ref,
+      competencyId: competency.id,
+      by,
+      resolution,
+      reasonDigest,
+      seq: entry.seq,
+    });
+    this.#store.writeArbitration(arbitration);
+    return arbitration;
+  }
+
+  arbitrations(candidateRef: string): readonly Arbitration[] {
+    const assignment = this.#panel(candidateRef);
+    return Object.freeze([...this.#store.readArbitrations(assignment.candidateRef)]);
+  }
+
+  debriefAgenda(candidateRef: string): readonly AgendaItem[] {
+    const trace = evaluateRule(this, candidateRef).trace;
+    const items = [
+      ...trace.gates.map((gate) => agendaItem(gate, gate.reason === 'ARBITRATION_REQUIRED')),
+      ...trace.observed.map((seen) => agendaItem(seen, false)),
+    ];
+    items.sort(byWidestGap);
+    return Object.freeze(items);
+  }
+
   readCards(viewer: ViewerRef, candidateRef: string): readonly CardView[] {
     const assignment = this.#panel(candidateRef);
     const ref = assignment.candidateRef;
@@ -530,6 +630,40 @@ export class Loop {
       .readRecusals(candidateRef)
       .find((recusal) => recusal.interviewerId === interviewerId);
   }
+}
+
+function agendaItem(trace: CompetencyTrace, needsArbitration: boolean): AgendaItem {
+  const item: AgendaItem = {
+    competencyId: trace.competencyId,
+    mustHave: trace.mustHave,
+    spread: trace.spread,
+    split: trace.split,
+    counted: trace.counted,
+    needsArbitration,
+  };
+  return Object.freeze(item);
+}
+
+function byWidestGap(left: AgendaItem, right: AgendaItem): number {
+  if (left.spread !== right.spread) {
+    return right.spread - left.spread;
+  }
+  if (left.competencyId < right.competencyId) {
+    return -1;
+  }
+  return left.competencyId > right.competencyId ? 1 : 0;
+}
+
+function competencyOf(rubric: Rubric, competencyId: unknown): Competency {
+  const id = typeof competencyId === 'string' ? competencyId.normalize('NFC') : '';
+  const competency = rubric.competencies.find((candidate) => candidate.id === id);
+  if (competency === undefined) {
+    throw new SealedLoopError(
+      'UNKNOWN_COMPETENCY',
+      `${display(competencyId)} is not a competency of this rubric`,
+    );
+  }
+  return competency;
 }
 
 function viewerIdOf(viewer: ViewerRef): string {
